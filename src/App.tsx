@@ -1,901 +1,285 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Battery, Navigation, CheckCircle, Upload, Search, ShieldAlert, Award } from 'lucide-react';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { CheckCircle2, Download, FileUp, RefreshCw, SlidersHorizontal, XCircle } from 'lucide-react';
+import { csvRowsToObjects, exportCsv } from './lib/csv';
+import { demoQueue } from './lib/demoData';
+import { applyDecisionRule } from './lib/decisionRules';
+import { ModelApiError, requestPredictions } from './lib/modelClient';
+import { loadOutputFiles } from './lib/outputFiles';
+import { predictionModeLabel } from './lib/predictionMode';
+import { calculateKpis, latestRecordPerDrone, sortPriorityQueue } from './lib/priorityQueue';
+import { buildPrecomputedRecords, validateTelemetryRows } from './lib/telemetryValidation';
+import type { DecisionLogEntry, ImportanceItem, ModelMetrics, PredictionMode, QueueRecord, Recommendation, ValidationResult } from './types';
 
-// Default mock data in case the user doesn't upload a CSV immediately
-const defaultData = [
-  { battery_level_pct: 11, wind_speed_mps: 1.22, distance_to_base_m: 1346, flight_time_s: 1734, altitude_m: 46, gps_lat: 31.904, gps_lon: 73.946, timestamp: "2024-07-27 05:00:00", mission_id: "MSN1934", mission_type: "Scan", Drone_ID: "DRN-009", DSS_Recommendation: "Return to Base", Confidence_Score: 1.0, Risk_Factor: "Critical: Low Battery" },
-  { battery_level_pct: 49, wind_speed_mps: 3.55, distance_to_base_m: 466, flight_time_s: 2552, altitude_m: 113, gps_lat: 32.112, gps_lon: 72.845, timestamp: "2024-07-27 05:15:00", mission_id: "MSN1409", mission_type: "Patrol", Drone_ID: "DRN-002", DSS_Recommendation: "Continue Mission", Confidence_Score: 1.0, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 60, wind_speed_mps: 6.90, distance_to_base_m: 392, flight_time_s: 629, altitude_m: 79, gps_lat: 31.954, gps_lon: 73.447, timestamp: "2024-07-27 05:30:00", mission_id: "MSN5506", mission_type: "Patrol", Drone_ID: "DRN-009", DSS_Recommendation: "Delay Mission", Confidence_Score: 0.98, Risk_Factor: "Critical: High Wind Speed" },
-  { battery_level_pct: 57, wind_speed_mps: 1.95, distance_to_base_m: 331, flight_time_s: 2997, altitude_m: 93, gps_lat: 32.415, gps_lon: 72.089, timestamp: "2024-07-27 05:45:00", mission_id: "MSN5012", mission_type: "Scan", Drone_ID: "DRN-003", DSS_Recommendation: "Continue Mission", Confidence_Score: 0.99, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 80, wind_speed_mps: 4.05, distance_to_base_m: 483, flight_time_s: 686, altitude_m: 89, gps_lat: 32.849, gps_lon: 72.996, timestamp: "2024-07-27 06:00:00", mission_id: "MSN2679", mission_type: "Patrol", Drone_ID: "DRN-001", DSS_Recommendation: "Continue Mission", Confidence_Score: 1.0, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 5, wind_speed_mps: 3.66, distance_to_base_m: 536, flight_time_s: 418, altitude_m: 113, gps_lat: 32.048, gps_lon: 72.688, timestamp: "2024-07-27 06:15:00", mission_id: "MSN9928", mission_type: "Scan", Drone_ID: "DRN-004", DSS_Recommendation: "Return to Base", Confidence_Score: 1.0, Risk_Factor: "Critical: Low Battery" },
-  { battery_level_pct: 14, wind_speed_mps: 1.65, distance_to_base_m: 446, flight_time_s: 1920, altitude_m: 40, gps_lat: 32.769, gps_lon: 72.448, timestamp: "2024-07-27 06:30:00", mission_id: "MSN4611", mission_type: "Track", Drone_ID: "DRN-007", DSS_Recommendation: "Return to Base", Confidence_Score: 1.0, Risk_Factor: "Critical: Low Battery" },
-  { battery_level_pct: 10, wind_speed_mps: 3.61, distance_to_base_m: 648, flight_time_s: 2921, altitude_m: 30, gps_lat: 31.626, gps_lon: 72.138, timestamp: "2024-07-27 06:45:00", mission_id: "MSN8359", mission_type: "Patrol", Drone_ID: "DRN-007", DSS_Recommendation: "Return to Base", Confidence_Score: 1.0, Risk_Factor: "Critical: Low Battery" },
-  { battery_level_pct: 34, wind_speed_mps: 5.03, distance_to_base_m: 127, flight_time_s: 2148, altitude_m: 41, gps_lat: 32.607, gps_lon: 73.876, timestamp: "2024-07-27 07:00:00", mission_id: "MSN3615", mission_type: "Scan", Drone_ID: "DRN-005", DSS_Recommendation: "Continue Mission", Confidence_Score: 0.99, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 73, wind_speed_mps: 2.29, distance_to_base_m: 73, flight_time_s: 264, altitude_m: 72, gps_lat: 31.761, gps_lon: 73.080, timestamp: "2024-07-27 07:15:00", mission_id: "MSN5741", mission_type: "Patrol", Drone_ID: "DRN-007", DSS_Recommendation: "Continue Mission", Confidence_Score: 1.0, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 9, wind_speed_mps: 2.50, distance_to_base_m: 1857, flight_time_s: 859, altitude_m: 59, gps_lat: 31.690, gps_lon: 72.233, timestamp: "2024-07-27 07:30:00", mission_id: "MSN2307", mission_type: "Scan", Drone_ID: "DRN-005", DSS_Recommendation: "Return to Base", Confidence_Score: 1.0, Risk_Factor: "Critical: Low Battery" },
-  { battery_level_pct: 40, wind_speed_mps: 5.08, distance_to_base_m: 1628, flight_time_s: 4257, altitude_m: 73, gps_lat: 32.324, gps_lon: 73.343, timestamp: "2024-07-27 07:45:00", mission_id: "MSN8428", mission_type: "Patrol", Drone_ID: "DRN-005", DSS_Recommendation: "Continue Mission", Confidence_Score: 0.99, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 25, wind_speed_mps: 2.48, distance_to_base_m: 208, flight_time_s: 643, altitude_m: 80, gps_lat: 32.966, gps_lon: 73.684, timestamp: "2024-07-27 08:00:00", mission_id: "MSN7065", mission_type: "Circle", Drone_ID: "DRN-006", DSS_Recommendation: "Continue Mission", Confidence_Score: 1.0, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 31, wind_speed_mps: 5.18, distance_to_base_m: 1022, flight_time_s: 2425, altitude_m: 94, gps_lat: 32.572, gps_lon: 72.230, timestamp: "2024-07-27 08:15:00", mission_id: "MSN3803", mission_type: "Patrol", Drone_ID: "DRN-010", DSS_Recommendation: "Continue Mission", Confidence_Score: 0.99, Risk_Factor: "Safe / Normal Operation" },
-  { battery_level_pct: 12, wind_speed_mps: 2.59, distance_to_base_m: 1685, flight_time_s: 860, altitude_m: 52, gps_lat: 31.783, gps_lon: 73.832, timestamp: "2024-07-27 08:30:00", mission_id: "MSN5010", mission_type: "Patrol", Drone_ID: "DRN-010", DSS_Recommendation: "Return to Base", Confidence_Score: 1.0, Risk_Factor: "Critical: Low Battery" },
-  { battery_level_pct: 69, wind_speed_mps: 4.61, distance_to_base_m: 167, flight_time_s: 1278, altitude_m: 83, gps_lat: 32.659, gps_lon: 73.791, timestamp: "2024-07-27 08:45:00", mission_id: "MSN2519", mission_type: "Patrol", Drone_ID: "DRN-010", DSS_Recommendation: "Continue Mission", Confidence_Score: 1.0, Risk_Factor: "Safe / Normal Operation" },
-];
+const statusStyles: Record<Recommendation, string> = {
+  'Return to Base': 'border-red-200 bg-red-50 text-red-800',
+  'Delay Mission': 'border-amber-200 bg-amber-50 text-amber-800',
+  'Continue Mission': 'border-green-200 bg-green-50 text-green-800',
+};
+
+function actionBadge(action: Recommendation) {
+  return <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-bold ${statusStyles[action]}`}>{action}</span>;
+}
+
+function displayNumber(value: number, digits = 1) {
+  return Number.isFinite(value) ? value.toFixed(digits) : '—';
+}
+
+function recordDecision(record: QueueRecord, action: Recommendation, status: 'Confirmed' | 'Overridden', reason: string): DecisionLogEntry {
+  return {
+    timestamp: new Date().toISOString(), drone_id: record.drone_id, mission_id: record.mission_id,
+    model_version: record.model_version, predicted_power_w: record.predicted_power_w,
+    system_recommendation: record.recommended_action, system_reason: record.decision_reason,
+    operator_action: action, override_reason: reason, decision_status: status,
+  };
+}
 
 export default function App() {
-  const [data, setData] = useState<any[]>(defaultData);
-  const [filter, setFilter] = useState('All');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedDroneId, setSelectedDroneId] = useState<string | null>('DRN-009');
+  const [records, setRecords] = useState<QueueRecord[]>(demoQueue);
+  const [mode, setMode] = useState<PredictionMode>('demo');
+  const [sourceStatus, setSourceStatus] = useState('Demo dataset loaded');
+  const [validation, setValidation] = useState<ValidationResult>({ records: demoQueue, rejected: [], totalRows: demoQueue.length, detectedPrecomputedOutput: false });
+  const [selectedDroneId, setSelectedDroneId] = useState(demoQueue[0].drone_id);
+  const [filter, setFilter] = useState<'All' | Recommendation>('All');
+  const [search, setSearch] = useState('');
+  const [modelMetrics, setModelMetrics] = useState<ModelMetrics>();
+  const [importance, setImportance] = useState<ImportanceItem[]>([]);
+  const [decisionLog, setDecisionLog] = useState<DecisionLogEntry[]>([]);
+  const [overrideAction, setOverrideAction] = useState<Recommendation>('Continue Mission');
+  const [overrideReason, setOverrideReason] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  // Xử lý upload file CSV từ user
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      if (!text) return;
-      const lines = text.split('\n');
-      const headers = lines[0].split(',').map(h => h.trim());
-      
-      const parsedData: any[] = [];
-      // Parse tối đa 1000 dòng để tránh lag giao diện
-      const limit = Math.min(lines.length, 1000);
-      
-      for (let i = 1; i < limit; i++) {
-        if (!lines[i].trim()) continue;
-        const values = lines[i].split(',');
-        if (values.length === headers.length) {
-          let row: any = {};
-          headers.forEach((header, index) => {
-            let val: any = values[index].trim();
-            if (!isNaN(val as any) && val !== '') {
-              val = parseFloat(val);
-            }
-            row[header] = val;
-          });
-          parsedData.push(row);
-        }
-      }
-      if (parsedData.length > 0) {
-        setData(parsedData);
-        // Chọn mặc định drone đầu tiên trong danh sách mới
-        if (parsedData[0].Drone_ID) {
-          setSelectedDroneId(parsedData[0].Drone_ID);
-        }
-      }
-    };
-    reader.readAsText(file);
-  };
-
-  // 1. Lọc dữ liệu theo Slicer và ô Tìm kiếm
-  const filteredData = useMemo(() => {
-    return data.filter(d => {
-      const matchesFilter = filter === 'All' || d.DSS_Recommendation === filter;
-      const matchesSearch = searchQuery === '' || 
-        (d.Drone_ID && d.Drone_ID.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (d.mission_id && String(d.mission_id).toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (d.Risk_Factor && d.Risk_Factor.toLowerCase().includes(searchQuery.toLowerCase()));
-      return matchesFilter && matchesSearch;
-    });
-  }, [data, filter, searchQuery]);
-
-  // 2. Tính toán các Drones duy nhất và trạng thái hiện tại (telemetry mới nhất của từng drone)
-  const droneLatestState = useMemo(() => {
-    const latest: Record<string, any> = {};
-    // Sắp xếp theo timestamp nếu có để lấy trạng thái mới nhất, nếu không lấy dòng xuất hiện cuối cùng
-    const sortedData = [...data].sort((a, b) => {
-      if (a.timestamp && b.timestamp) {
-        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-      }
-      return 0;
-    });
-
-    sortedData.forEach(d => {
-      if (d.Drone_ID) {
-        latest[d.Drone_ID] = d;
-      }
-    });
-    return latest;
-  }, [data]);
-
-  const dronesList = useMemo(() => Object.values(droneLatestState), [droneLatestState]);
-
-  // 3. Tính toán KPIs chính xác
-  const kpis = useMemo(() => {
-    const totalDrones = dronesList.length;
-    if (totalDrones === 0) {
-      return { totalDrones: 0, highRiskRate: 0, avgBattery: 0, completionRate: 0 };
-    }
-
-    // A. High Risk Drones
-    const highRiskDronesCount = dronesList.filter(d => {
-      const isLowBattery = (d.battery_level_pct || 0) < 20;
-      const isHighWind = (d.wind_speed_mps || 0) > 6.5;
-      const isReturnBase = d.DSS_Recommendation === 'Return to Base';
-      return isLowBattery || isHighWind || isReturnBase;
-    }).length;
-    const highRiskRate = (highRiskDronesCount / totalDrones) * 100;
-
-    // B. Average Battery
-    const sumBattery = dronesList.reduce((acc, curr) => acc + (curr.battery_level_pct || 0), 0);
-    const avgBattery = sumBattery / totalDrones;
-
-    // C. Mission Completion Rate
-    // Group telemetry theo mission_id
-    const missions: Record<string, { failed: boolean }> = {};
-    data.forEach(d => {
-      if (d.mission_id) {
-        if (!missions[d.mission_id]) {
-          missions[d.mission_id] = { failed: false };
-        }
-        // Nếu AI khuyến nghị Return to Base tại bất cứ điểm nào, coi như nhiệm vụ thất bại / phải hủy giữa chừng
-        if (d.DSS_Recommendation === 'Return to Base') {
-          missions[d.mission_id].failed = true;
-        }
-      }
-    });
-
-    const missionKeys = Object.keys(missions);
-    const totalMissions = missionKeys.length;
-    const completedMissions = missionKeys.filter(k => !missions[k].failed).length;
-    const completionRate = totalMissions > 0 ? (completedMissions / totalMissions) * 100 : 0;
-
-    return {
-      totalDrones,
-      highRiskRate,
-      avgBattery,
-      completionRate
-    };
-  }, [data, dronesList]);
-
-  // 4. Phân bổ khuyến nghị AI cho biểu đồ tròn
-  const recommendationDistribution = useMemo(() => {
-    const counts = { 'Continue Mission': 0, 'Return to Base': 0, 'Delay Mission': 0 };
-    let total = 0;
-    dronesList.forEach(d => {
-      const rec = d.DSS_Recommendation;
-      if (rec && counts[rec as keyof typeof counts] !== undefined) {
-        counts[rec as keyof typeof counts]++;
-        total++;
-      }
-    });
-    return {
-      continuePct: total > 0 ? (counts['Continue Mission'] / total) * 100 : 0,
-      returnPct: total > 0 ? (counts['Return to Base'] / total) * 100 : 0,
-      delayPct: total > 0 ? (counts['Delay Mission'] / total) * 100 : 0,
-      total
-    };
-  }, [dronesList]);
-
-  // 5. Lấy lịch sử mức pin của Drone đang được chọn (Battery Trend Line)
-  const selectedDroneHistory = useMemo(() => {
-    if (!selectedDroneId) return [];
-    return data
-      .filter(d => d.Drone_ID === selectedDroneId)
-      .sort((a, b) => {
-        if (a.timestamp && b.timestamp) {
-          return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-        }
-        return 0;
-      });
-  }, [data, selectedDroneId]);
-
-  // 6. Cấu hình bản đồ vệ tinh thực tế Leaflet cho Ninh Thuận
-  const mapRef = useRef<L.Map | null>(null);
-  const markersLayerRef = useRef<L.LayerGroup | null>(null);
-
-  // Trung tâm dự án Nhà máy điện mặt trời Trung Nam, Thuận Bắc, Ninh Thuận
-  const ninhThuanCenter = { lat: 11.6214, lng: 108.9785 };
-
-  // Tính tọa độ trung tâm của dữ liệu nạp vào để làm gốc tọa độ
-  const dataCenter = useMemo(() => {
-    const lats = data.map(d => d.gps_lat).filter(Boolean);
-    const lons = data.map(d => d.gps_lon).filter(Boolean);
-    if (lats.length === 0) return { lat: 32.112, lon: 72.845 };
-    return {
-      lat: lats.reduce((a, b) => a + b, 0) / lats.length,
-      lon: lons.reduce((a, b) => a + b, 0) / lons.length
-    };
-  }, [data]);
-
-  // Hàm dịch chuyển tọa độ từ dữ liệu gốc sang tọa độ Ninh Thuận
-  const getRealCoordinates = (gps_lat: number, gps_lon: number): [number, number] => {
-    if (!gps_lat || !gps_lon) return [ninhThuanCenter.lat, ninhThuanCenter.lng];
-    const offsetLat = gps_lat - dataCenter.lat;
-    const offsetLon = gps_lon - dataCenter.lon;
-    // Độ khuếch đại khoảng cách để các drone không bị quá khít nhau trên bản đồ thực tế
-    return [ninhThuanCenter.lat + offsetLat * 0.4, ninhThuanCenter.lng + offsetLon * 0.4];
-  };
-
-  // Tính bounds để hiển thị toàn bộ phi đội
-  const realBounds = useMemo(() => {
-    const points = dronesList.map(d => {
-      if (!d.gps_lat || !d.gps_lon) return null;
-      return getRealCoordinates(d.gps_lat, d.gps_lon);
-    }).filter(Boolean) as [number, number][];
-
-    if (points.length === 0) return null;
-    return L.latLngBounds(points);
-  }, [dronesList, dataCenter]);
-
-  // Khởi tạo bản đồ Leaflet
   useEffect(() => {
-    if (!mapRef.current) {
-      const map = L.map('leaflet-map-container', {
-        center: [ninhThuanCenter.lat, ninhThuanCenter.lng],
-        zoom: 15,
-        zoomControl: false,
-        attributionControl: false
-      });
-
-      // Lớp ảnh vệ tinh độ phân giải cao của ArcGIS Esri
-      L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-        maxZoom: 19
-      }).addTo(map);
-
-      L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-      const markersLayer = L.layerGroup().addTo(map);
-      markersLayerRef.current = markersLayer;
-      mapRef.current = map;
-    }
-
-    return () => {
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
+    void loadOutputFiles().then(({ metrics, importance: loadedImportance, precomputedQueue, modelName, modelVersion, ruleConfig }) => {
+      if (metrics) setModelMetrics(metrics);
+      setImportance(loadedImportance);
+      if (precomputedQueue.length) {
+        const queue = ruleConfig ? precomputedQueue.map((record) => ({ ...record, rule_config: ruleConfig })) : precomputedQueue;
+        setRecords(queue);
+        setMode('precomputed');
+        setSourceStatus('Precomputed model output loaded from bundled notebook output');
+        setValidation({ records: queue, rejected: [], totalRows: queue.length, detectedPrecomputedOutput: true });
+        setSelectedDroneId(queue[0].drone_id);
+        if (!metrics) setModelMetrics({ model_name: modelName, model_version: modelVersion });
       }
-    };
+    });
   }, []);
 
-  // Cập nhật Marker khi danh sách Drone hoặc lựa chọn Drone thay đổi
-  useEffect(() => {
-    const map = mapRef.current;
-    const markersLayer = markersLayerRef.current;
-    if (!map || !markersLayer) return;
+  const latestQueue = useMemo(() => sortPriorityQueue(latestRecordPerDrone(records)), [records]);
+  const visibleQueue = useMemo(() => latestQueue.filter((record) => (filter === 'All' || record.recommended_action === filter)
+    && `${record.drone_id} ${record.mission_id} ${record.decision_reason}`.toLowerCase().includes(search.toLowerCase())), [filter, latestQueue, search]);
+  const selected = latestQueue.find((record) => record.drone_id === selectedDroneId) ?? latestQueue[0];
+  const kpis = useMemo(() => calculateKpis(latestQueue), [latestQueue]);
+  const lastProcessed = latestQueue.reduce<string | undefined>((latest, record) => (!latest || new Date(record.timestamp) > new Date(latest) ? record.timestamp : latest), undefined);
+  const selectedLog = selected ? [...decisionLog].reverse().find((entry) => entry.drone_id === selected.drone_id && entry.mission_id === selected.mission_id) : undefined;
 
-    markersLayer.clearLayers();
-
-    dronesList.forEach(d => {
-      if (!d.gps_lat || !d.gps_lon) return;
-
-      const [lat, lon] = getRealCoordinates(d.gps_lat, d.gps_lon);
-      const isSelected = selectedDroneId === d.Drone_ID;
-
-      let pulseColor = 'bg-emerald-500';
-      let bgColor = 'bg-emerald-500';
-      if (d.DSS_Recommendation === 'Return to Base') {
-        pulseColor = 'bg-red-500';
-        bgColor = 'bg-red-500';
-      } else if (d.DSS_Recommendation === 'Delay Mission') {
-        pulseColor = 'bg-amber-500';
-        bgColor = 'bg-amber-500';
-      }
-
-      const droneIdShort = d.Drone_ID.replace('DRN-', '');
-
-      const customIcon = L.divIcon({
-        className: 'custom-drone-icon-wrap',
-        html: `
-          <div class="relative flex items-center justify-center pointer-events-none" style="width: 24px; height: 24px;">
-            ${(isSelected || d.DSS_Recommendation === 'Return to Base') ? `<div class="absolute w-8 h-8 rounded-full ${pulseColor} opacity-30 animate-ping"></div>` : ''}
-            <div class="w-6 h-6 rounded-full ${bgColor} border-2 ${isSelected ? 'border-white scale-125' : 'border-slate-800'} shadow-lg flex items-center justify-center transition-all">
-              <span class="text-[9px] text-white font-extrabold">${droneIdShort}</span>
-            </div>
-          </div>
-        `,
-        iconSize: [24, 24],
-        iconAnchor: [12, 12]
-      });
-
-      const marker = L.marker([lat, lon], { icon: customIcon });
-
-      // Custom Tooltip
-      marker.bindTooltip(`
-        <div style="font-family: sans-serif; background-color: #0f172a; color: #f8fafc; border: 1px solid #334155; padding: 6px 10px; border-radius: 6px; font-size: 11px;">
-          <div style="font-weight: bold; margin-bottom: 2px;">Drone: ${d.Drone_ID}</div>
-          <div>Mức pin: ${d.battery_level_pct}%</div>
-          <div>Tốc độ gió: ${d.wind_speed_mps.toFixed(2)} m/s</div>
-          <div style="color: #fbbf24; font-weight: bold; margin-top: 4px;">AI: ${d.DSS_Recommendation}</div>
-        </div>
-      `, {
-        className: 'custom-leaflet-tooltip',
-        direction: 'top',
-        offset: [0, -10]
-      });
-
-      marker.on('click', () => {
-        setSelectedDroneId(d.Drone_ID);
-      });
-
-      marker.addTo(markersLayer);
-    });
-
-    // Zoom vừa vặn các Drone
-    if (realBounds && dronesList.length > 0) {
-      map.fitBounds(realBounds, { padding: [40, 40] });
+  const processCsv = async (text: string, name: string) => {
+    const rows = csvRowsToObjects(text);
+    const result = validateTelemetryRows(rows);
+    setValidation(result);
+    setError('');
+    if (!result.records.length) {
+      setSourceStatus(`${name}: no valid records`);
+      setError('No accepted records were available after validation. Review the rejected-record report.');
+      return;
     }
-  }, [dronesList, selectedDroneId, realBounds]);
-
-  // Tự động di chuyển camera đến drone khi click chọn drone trên bảng
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !selectedDroneId) return;
-
-    const activeDrone = dronesList.find(d => d.Drone_ID === selectedDroneId);
-    if (activeDrone && activeDrone.gps_lat && activeDrone.gps_lon) {
-      const [lat, lon] = getRealCoordinates(activeDrone.gps_lat, activeDrone.gps_lon);
-      map.flyTo([lat, lon], 17, { animate: true, duration: 1.2 });
+    setIsLoading(true);
+    try {
+      if (result.detectedPrecomputedOutput) {
+        const precomputed = buildPrecomputedRecords(rows, result.records);
+        if (!precomputed.length) throw new Error('The precomputed output did not contain valid predicted power and recommendation values.');
+        setRecords(precomputed);
+        setMode('precomputed');
+        setSourceStatus('Precomputed model output loaded from CSV');
+        setSelectedDroneId(precomputed[0].drone_id);
+        return;
+      }
+      const response = await requestPredictions(result.records);
+      const predicted = response.results.flatMap((item) => item.predictedPower === undefined ? [] : [{
+        ...item.record,
+        predicted_power_w: item.predictedPower,
+        ...applyDecisionRule(item.record, item.predictedPower, response.ruleConfig),
+        model_version: response.modelVersion,
+        rule_config: response.ruleConfig,
+      }]);
+      const predictionFailures = response.results.flatMap((item, index) => item.predictedPower === undefined ? [{
+        rowNumber: index + 2, missingFields: [], invalidFields: [`model prediction: ${item.error}`],
+      }] : []);
+      setValidation((current) => ({ ...current, rejected: [...current.rejected, ...predictionFailures] }));
+      setRecords(predicted);
+      setMode('live');
+      setSourceStatus(predictionFailures.length ? `Live model response loaded with ${predictionFailures.length} rejected prediction(s)` : `Live model response loaded from ${name}`);
+      setSelectedDroneId(predicted[0].drone_id);
+      setModelMetrics(response.metrics ?? { model_name: response.modelName, model_version: response.modelVersion });
+    } catch (requestError) {
+      setSourceStatus(`${name}: valid records awaiting a model response`);
+      setError(requestError instanceof ModelApiError || requestError instanceof Error ? requestError.message : 'Prediction processing failed.');
+    } finally {
+      setIsLoading(false);
     }
-  }, [selectedDroneId]);
+  };
 
-  // 7. Tạo danh sách Cảnh báo (Alert Panel) từ các drone rủi ro
-  const alertsList = useMemo(() => {
-    const alerts: any[] = [];
-    dronesList.forEach(d => {
-      if ((d.battery_level_pct || 0) < 20) {
-        alerts.push({
-          id: `${d.Drone_ID}-battery`,
-          type: 'danger',
-          drone: d.Drone_ID,
-          message: `Low Battery warning: ${d.battery_level_pct}%`,
-          action: 'Return Immediately'
-        });
-      }
-      if ((d.wind_speed_mps || 0) > 6.5) {
-        alerts.push({
-          id: `${d.Drone_ID}-wind`,
-          type: 'warning',
-          drone: d.Drone_ID,
-          message: `High Wind speed warning: ${d.wind_speed_mps.toFixed(2)} m/s`,
-          action: 'Delay Mission / Deploy Backup'
-        });
-      }
-      if (d.DSS_Recommendation === 'Return to Base' && (d.battery_level_pct || 0) >= 20) {
-        alerts.push({
-          id: `${d.Drone_ID}-base`,
-          type: 'critical',
-          drone: d.Drone_ID,
-          message: `Distance/Altitude Risk detected. AI recommends Return.`,
-          action: 'Initiate RTL protocol'
-        });
-      }
-    });
-    return alerts;
-  }, [dronesList]);
+  const handleUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => void processCsv(String(reader.result ?? ''), file.name);
+    reader.onerror = () => setError('The CSV file could not be read.');
+    reader.readAsText(file);
+    event.target.value = '';
+  };
 
-  // CSS Conic Gradient cho Donut Chart
-  const conicGradient = `conic-gradient(
-    #10b981 0% ${recommendationDistribution.continuePct}%, 
-    #ef4444 ${recommendationDistribution.continuePct}% ${recommendationDistribution.continuePct + recommendationDistribution.returnPct}%, 
-    #f59e0b ${recommendationDistribution.continuePct + recommendationDistribution.returnPct}% 100%
-  )`;
+  const loadBundledPrecomputed = async () => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const output = await loadOutputFiles();
+      if (!output.precomputedQueue.length) throw new Error('No bundled dashboard_decision_queue.csv was found. Place the notebook output under public/outputs/model/.');
+      const queue = output.ruleConfig ? output.precomputedQueue.map((record) => ({ ...record, rule_config: output.ruleConfig })) : output.precomputedQueue;
+      setRecords(queue);
+      setMode('precomputed');
+      setSourceStatus('Precomputed model output loaded from bundled notebook output');
+      setValidation({ records: queue, rejected: [], totalRows: queue.length, detectedPrecomputedOutput: true });
+      setSelectedDroneId(queue[0].drone_id);
+      if (output.metrics) setModelMetrics(output.metrics);
+      else setModelMetrics({ model_name: output.modelName, model_version: output.modelVersion });
+      setImportance(output.importance);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Precomputed output could not be loaded.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const loadDemo = () => {
+    setRecords(demoQueue);
+    setMode('demo');
+    setSourceStatus('Demo dataset loaded');
+    setValidation({ records: demoQueue, rejected: [], totalRows: demoQueue.length, detectedPrecomputedOutput: false });
+    setSelectedDroneId(demoQueue[0].drone_id);
+    setError('');
+  };
+
+  const saveDecision = (action: Recommendation, status: 'Confirmed' | 'Overridden') => {
+    if (!selected) return;
+    if (status === 'Overridden' && !overrideReason.trim()) {
+      setError('Provide an override reason before recording an overridden decision.');
+      return;
+    }
+    setDecisionLog((entries) => [...entries, recordDecision(selected, action, status, status === 'Overridden' ? overrideReason.trim() : '')]);
+    setOverrideReason('');
+    setError('');
+  };
+
+  const exportLog = () => {
+    const content = exportCsv(decisionLog.map((entry) => ({
+      timestamp: entry.timestamp,
+      drone_id: entry.drone_id,
+      mission_id: entry.mission_id,
+      model_version: entry.model_version,
+      predicted_power_w: entry.predicted_power_w,
+      system_recommendation: entry.system_recommendation,
+      system_reason: entry.system_reason,
+      operator_action: entry.operator_action,
+      override_reason: entry.override_reason,
+      decision_status: entry.decision_status,
+    })));
+    const url = URL.createObjectURL(new Blob([content], { type: 'text/csv' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = 'uav-decision-log.csv'; link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const missingSummary = useMemo(() => {
+    const allFields = validation.rejected.flatMap((item) => [...item.missingFields, ...item.invalidFields]);
+    return [...new Set(allFields)].join(', ') || 'None';
+  }, [validation.rejected]);
+  const maximumImportance = Math.max(...importance.map((item) => Math.abs(item.importance)), 1);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 font-sans antialiased selection:bg-amber-500 selection:text-black">
-      
-      {/* HEADER SECTION */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 pb-5 border-b border-slate-800 gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 text-xs font-bold bg-amber-500 text-black rounded tracking-widest uppercase">Decision Support System</span>
-            <span className="text-xs text-slate-400 font-mono">v1.2.0</span>
-          </div>
-          <h1 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-amber-400 via-amber-200 to-amber-500 tracking-wide mt-1">
-            NINH THUAN SOLAR FARM
-          </h1>
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mt-1.5 flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            Drone Fleet Control Hub — Operations Center
-          </p>
-        </div>
-        
-        {/* CSV Uploader */}
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-slate-500 px-4 py-2.5 rounded-lg cursor-pointer transition-all shadow-md group">
-            <Upload size={18} className="text-amber-400 group-hover:scale-110 transition" />
-            <span className="text-sm font-semibold text-slate-200">Nạp CSV telemetry mới nhất</span>
-            <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
-          </label>
-        </div>
-      </div>
-
-      {/* TIER 1: KPI CARDS */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-        {/* KPI 1: Active Drones */}
-        <div className="bg-slate-900 rounded-xl p-6 border border-slate-800 hover:border-slate-700 transition shadow-lg relative overflow-hidden group">
-          <div className="absolute right-0 bottom-0 translate-x-2 translate-y-2 opacity-5 text-slate-100 pointer-events-none">
-            <Navigation size={120} />
-          </div>
-          <div className="flex justify-between items-start mb-2">
-            <p className="text-slate-350 text-sm font-extrabold uppercase tracking-wider">Active Fleet</p>
-            <span className="p-2 bg-blue-500/10 rounded-lg text-blue-400 group-hover:scale-110 transition">
-              <Navigation size={18} />
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2 mt-3">
-            <h2 className="text-5xl font-black text-white tracking-tight">{kpis.totalDrones}</h2>
-            <span className="text-slate-300 text-sm font-bold ml-1">UAVs online</span>
-          </div>
-          <div className="mt-3.5 text-xs text-slate-400 font-medium">
-            Tổng số drone đang gửi dữ liệu
-          </div>
-        </div>
-
-        {/* KPI 2: High Risk Rate */}
-        <div className="bg-slate-900 rounded-xl p-6 border border-slate-800 hover:border-slate-700 transition shadow-lg relative overflow-hidden group">
-          <div className="absolute right-0 bottom-0 translate-x-2 translate-y-2 opacity-5 text-slate-100 pointer-events-none">
-            <ShieldAlert size={120} />
-          </div>
-          <div className="flex justify-between items-start mb-2">
-            <p className="text-slate-350 text-sm font-extrabold uppercase tracking-wider">High Risk Rate</p>
-            <span className={`p-2 rounded-lg group-hover:scale-110 transition ${kpis.highRiskRate > 15 ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
-              <ShieldAlert size={18} />
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2 mt-3">
-            <h2 className="text-5xl font-black text-white tracking-tight">
-              {kpis.highRiskRate.toFixed(1)}%
-            </h2>
-            <span className={`text-sm font-extrabold ml-1 ${kpis.highRiskRate > 15 ? 'text-red-450 animate-pulse' : 'text-emerald-400'}`}>
-              {kpis.highRiskRate > 15 ? 'Cảnh báo cao' : 'Mức an toàn'}
-            </span>
-          </div>
-          <div className="mt-3.5 text-xs text-slate-400 font-medium">
-            Tỷ lệ drone gặp sự cố pin/gió hoặc AI khuyên Return
-          </div>
-        </div>
-
-        {/* KPI 3: Average Battery */}
-        <div className="bg-slate-900 rounded-xl p-6 border border-slate-800 hover:border-slate-700 transition shadow-lg relative overflow-hidden group">
-          <div className="absolute right-0 bottom-0 translate-x-2 translate-y-2 opacity-5 text-slate-100 pointer-events-none">
-            <Battery size={120} />
-          </div>
-          <div className="flex justify-between items-start mb-2">
-            <p className="text-slate-350 text-sm font-extrabold uppercase tracking-wider">Fleet Avg Battery</p>
-            <span className={`p-2 rounded-lg group-hover:scale-110 transition ${kpis.avgBattery < 35 ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
-              <Battery size={18} />
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2 mt-3">
-            <h2 className="text-5xl font-black text-white tracking-tight">
-              {kpis.avgBattery.toFixed(1)}%
-            </h2>
-            <span className="text-slate-300 text-sm font-bold ml-1">Trung bình</span>
-          </div>
-          <div className="mt-3.5 text-xs text-slate-400 font-medium">
-            Pin trung bình toàn đội. {kpis.avgBattery < 40 ? 'Đề xuất đổi ca pin' : 'Đủ điều kiện hoạt động'}
-          </div>
-        </div>
-
-        {/* KPI 4: Mission Completion Rate */}
-        <div className="bg-slate-900 rounded-xl p-6 border border-slate-800 hover:border-slate-700 transition shadow-lg relative overflow-hidden group">
-          <div className="absolute right-0 bottom-0 translate-x-2 translate-y-2 opacity-5 text-slate-100 pointer-events-none">
-            <Award size={120} />
-          </div>
-          <div className="flex justify-between items-start mb-2">
-            <p className="text-slate-350 text-sm font-extrabold uppercase tracking-wider">Mission Completion Rate</p>
-            <span className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400 group-hover:scale-110 transition">
-              <Award size={18} />
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2 mt-3">
-            <h2 className="text-5xl font-black text-emerald-400 tracking-tight">
-              {kpis.completionRate.toFixed(1)}%
-            </h2>
-            <span className="text-slate-300 text-sm font-bold ml-1">Tỷ lệ thành công</span>
-          </div>
-          <div className="mt-3.5 text-xs text-slate-400 font-medium">
-            Tỷ lệ nhiệm vụ kiểm tra hoàn thành trọn vẹn
-          </div>
-        </div>
-      </div>
-
-      {/* MAIN CONTAINER */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
-        
-        {/* LEFT COLUMN: FILTERS & ALERTS */}
-        <div className="lg:col-span-1 flex flex-col gap-6">
-          
-          {/* ACTION SLICER */}
-          <div className="bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg">
-            <h3 className="text-slate-300 text-sm font-bold mb-4 uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-1.5 h-3 bg-amber-500 rounded"></span> Bộ lọc AI (Slicer)
-            </h3>
-            
-            {/* Search Input */}
-            <div className="relative mb-4">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input 
-                type="text"
-                placeholder="Tìm Drone, mã nhiệm vụ..."
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 focus:border-slate-650 pl-9 pr-4 py-2.5 rounded-lg text-sm outline-none transition text-slate-200"
-              />
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <button 
-                onClick={() => setFilter('All')} 
-                className={`text-left px-3 py-2.5 rounded-lg text-sm font-bold border transition ${filter === 'All' ? 'bg-slate-800 border-slate-700 text-white' : 'border-transparent text-slate-350 hover:bg-slate-800/40 hover:text-white'}`}
-              >
-                Tất cả (All)
-              </button>
-              
-              <button 
-                onClick={() => setFilter('Continue Mission')} 
-                className={`text-left px-3 py-2.5 rounded-lg text-sm font-bold border flex items-center justify-between transition ${filter === 'Continue Mission' ? 'bg-emerald-950/40 border-emerald-500 text-emerald-250' : 'border-transparent text-slate-350 hover:bg-slate-800/40 hover:text-white'}`}
-              >
-                <span className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500"></div> Continue Mission
-                </span>
-                <span className="text-xs text-slate-450 font-bold font-mono">AI</span>
-              </button>
-              
-              <button 
-                onClick={() => setFilter('Delay Mission')} 
-                className={`text-left px-3 py-2.5 rounded-lg text-sm font-bold border flex items-center justify-between transition ${filter === 'Delay Mission' ? 'bg-amber-950/40 border-amber-500 text-amber-250' : 'border-transparent text-slate-350 hover:bg-slate-800/40 hover:text-white'}`}
-              >
-                <span className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-amber-500"></div> Delay Mission
-                </span>
-                <span className="text-xs text-slate-450 font-bold font-mono">AI</span>
-              </button>
-
-              <button 
-                onClick={() => setFilter('Return to Base')} 
-                className={`text-left px-3 py-2.5 rounded-lg text-sm font-bold border flex items-center justify-between transition ${filter === 'Return to Base' ? 'bg-red-950/40 border-red-500 text-red-250' : 'border-transparent text-slate-350 hover:bg-slate-800/40 hover:text-white'}`}
-              >
-                <span className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-red-500"></div> Return to Base
-                </span>
-                <span className="text-xs text-slate-450 font-bold font-mono">AI</span>
-              </button>
-            </div>
-          </div>
-
-          {/* ALERT PANEL */}
-          <div className="bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg flex-grow flex flex-col">
-            <h3 className="text-slate-300 text-sm font-bold mb-4 uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-1.5 h-3 bg-red-500 rounded"></span> Bảng Cảnh báo (Alerts)
-            </h3>
-            
-            <div className="flex flex-col gap-3 max-h-[300px] overflow-y-auto pr-1">
-              {alertsList.map((alert) => (
-                <div 
-                  key={alert.id}
-                  onClick={() => setSelectedDroneId(alert.drone)}
-                  className={`p-3.5 rounded-lg border text-left cursor-pointer hover:scale-[1.02] transition-all relative overflow-hidden ${
-                    alert.type === 'danger' ? 'bg-red-950/35 border-red-900 text-red-150' : 
-                    alert.type === 'warning' ? 'bg-amber-950/35 border-amber-900 text-amber-150' : 
-                    'bg-slate-950 border-slate-850 text-slate-200'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-sm font-extrabold text-white">{alert.drone}</span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider ${
-                      alert.type === 'danger' ? 'bg-red-500 text-white' : 'bg-amber-500 text-black'
-                    }`}>
-                      {alert.type === 'danger' ? 'critical' : 'warning'}
-                    </span>
-                  </div>
-                  <p className="text-xs leading-relaxed mb-2 opacity-95 text-slate-200 font-medium">{alert.message}</p>
-                  <div className="flex items-center gap-1 text-xs font-extrabold text-amber-400 hover:text-amber-300 transition">
-                    <span>Hành động:</span>
-                    <span>{alert.action} &rarr;</span>
-                  </div>
-                </div>
-              ))}
-              
-              {alertsList.length === 0 && (
-                <div className="flex flex-col items-center justify-center py-8 text-slate-500 text-xs gap-2">
-                  <CheckCircle className="text-emerald-500" size={24} />
-                  <span>Hệ thống an toàn. Không có cảnh báo.</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* MIDDLE COLUMN: MAP & TRENDS */}
-        <div className="lg:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-6">
-          
-          {/* DRONE MAP */}
-          <div className="md:col-span-2 bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-slate-350 text-sm font-bold uppercase tracking-wider flex items-center gap-1.5">
-                <span className="w-1.5 h-3 bg-amber-500 rounded"></span> Bản đồ Drone (Drone Location Map)
-              </h3>
-              <span className="text-xs font-semibold text-slate-300 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400"></span> Ninh Thuận Grid
-              </span>
-            </div>
-            
-            {/* Live Leaflet Satellite Map */}
-            <div className="relative flex-grow min-h-[300px] rounded-xl border border-slate-800 overflow-hidden">
-              <div id="leaflet-map-container" className="w-full h-full min-h-[300px]" style={{ zIndex: 10 }}></div>
-            </div>
-          </div>
-
-          {/* AI DONUT / SUMMARY */}
-          <div className="bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col items-center justify-between">
-            <h3 className="text-slate-350 text-sm font-bold uppercase tracking-wider self-start flex items-center gap-1.5">
-              <span className="w-1.5 h-3 bg-emerald-500 rounded"></span> DSS Recommendations
-            </h3>
-            
-            <div className="relative w-36 h-36 rounded-full flex items-center justify-center my-3" style={{ background: conicGradient }}>
-              <div className="absolute w-26 h-26 bg-slate-900 rounded-full flex flex-col items-center justify-center shadow-inner">
-                <span className="text-2xl font-black text-white">{recommendationDistribution.total}</span>
-                <span className="text-xs text-slate-400 font-extrabold tracking-widest uppercase mt-0.5">Fleet Size</span>
-              </div>
-            </div>
-
-            <div className="w-full flex flex-col gap-1 text-xs font-semibold mt-2">
-              <div className="flex justify-between items-center bg-slate-950 p-1.5 rounded border border-slate-850">
-                <span className="flex items-center gap-1.5 text-slate-300">
-                  <span className="w-2 h-2 bg-emerald-500 rounded-full"></span> Continue
-                </span>
-                <span className="font-bold text-white">{recommendationDistribution.continuePct.toFixed(0)}%</span>
-              </div>
-              <div className="flex justify-between items-center bg-slate-950 p-1.5 rounded border border-slate-850">
-                <span className="flex items-center gap-1.5 text-slate-300">
-                  <span className="w-2 h-2 bg-amber-500 rounded-full"></span> Delay
-                </span>
-                <span className="font-bold text-white">{recommendationDistribution.delayPct.toFixed(0)}%</span>
-              </div>
-              <div className="flex justify-between items-center bg-slate-950 p-1.5 rounded border border-slate-850">
-                <span className="flex items-center gap-1.5 text-slate-300">
-                  <span className="w-2 h-2 bg-red-500 rounded-full"></span> Return
-                </span>
-                <span className="font-bold text-white">{recommendationDistribution.returnPct.toFixed(0)}%</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* TIER 2: BATTERY TRENDS LINE CHART */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
-        
-        {/* RECOMMENDATION DISTRIBUTION PROGRESS BARS */}
-        <div className="lg:col-span-1 bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col justify-between">
+    <main className="min-h-screen bg-[#EAF6FC] px-4 py-6 text-[#172033] sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-7xl">
+        <header className="mb-6 flex flex-col gap-4 border-b-2 border-[#242879] pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h3 className="text-slate-350 text-sm font-bold mb-4 uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-1.5 h-3 bg-amber-500 rounded"></span> AI Recommendation Ratio
-            </h3>
-            <p className="text-slate-400 text-xs mb-4 font-medium">Mô hình Random Forest phân bổ đề xuất vận hành.</p>
+            <p className="mb-1 text-xs font-bold uppercase tracking-[0.16em] text-[#2E82D8]">DSS301 Group 2</p>
+            <h1 className="text-3xl font-extrabold tracking-tight text-[#242879]">UAV Energy Decision Support</h1>
+            <p className="mt-1 text-sm text-slate-600">Decision-support prototype for in-flight inspection operations</p>
           </div>
+          <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-xs sm:grid-cols-4">
+            <div><span className="block text-slate-500">Data source</span><strong>{sourceStatus}</strong></div>
+            <div><span className="block text-slate-500">Prediction mode</span><strong>{predictionModeLabel[mode]}</strong></div>
+            <div><span className="block text-slate-500">Model version</span><strong>{selected?.model_version ?? 'Unavailable'}</strong></div>
+            <div><span className="block text-slate-500">Last processed</span><strong>{lastProcessed ? new Date(lastProcessed).toLocaleString() : '—'}</strong></div>
+          </div>
+        </header>
 
-          <div className="flex flex-col gap-4">
-            <div>
-              <div className="flex justify-between text-sm font-bold mb-1">
-                <span>Continue Mission</span>
-                <span className="text-emerald-400">{recommendationDistribution.continuePct.toFixed(1)}%</span>
-              </div>
-              <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden">
-                <div className="h-full bg-emerald-500 transition-all duration-500" style={{ width: `${recommendationDistribution.continuePct}%` }}></div>
-              </div>
-            </div>
+        <section aria-label="Data controls" className="mb-6 flex flex-col gap-3 rounded-2xl border border-blue-100 bg-white p-4 shadow-sm md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-wrap gap-2">
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-[#2E82D8] px-3 py-2 text-sm font-bold text-white hover:bg-[#238EE8] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-[#242879]">
+              <FileUp size={16} /> Upload telemetry CSV
+              <input className="sr-only" type="file" accept=".csv,text/csv" onChange={handleUpload} />
+            </label>
+            <button type="button" onClick={() => void loadBundledPrecomputed()} className="inline-flex items-center gap-2 rounded-lg border border-[#2E82D8] px-3 py-2 text-sm font-bold text-[#242879] hover:bg-[#EAF6FC] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242879]"><RefreshCw size={16} /> Load precomputed output</button>
+            <button type="button" onClick={loadDemo} className="rounded-lg px-3 py-2 text-sm font-bold text-[#242879] underline underline-offset-4 hover:text-[#2E82D8] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242879]">Use demo data</button>
+          </div>
+          <p className="max-w-xl text-xs leading-5 text-slate-600">Academic decision-support prototype. Recommendations are based on proxy telemetry data and prototype rules. The Operations Engineer retains final authority.</p>
+        </section>
 
-            <div>
-              <div className="flex justify-between text-sm font-bold mb-1">
-                <span>Delay Mission</span>
-                <span className="text-amber-400">{recommendationDistribution.delayPct.toFixed(1)}%</span>
-              </div>
-              <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden">
-                <div className="h-full bg-amber-500 transition-all duration-500" style={{ width: `${recommendationDistribution.delayPct}%` }}></div>
-              </div>
-            </div>
+        {mode === 'demo' && <div role="status" className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900"><strong>Demo data — not live telemetry.</strong> Values support a traceable prototype workflow only.</div>}
+        {mode === 'precomputed' && <div role="status" className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900"><strong>Precomputed model output — no live model request was performed.</strong></div>}
+        {error && <div role="alert" className="mb-4 flex gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900"><XCircle size={18} className="shrink-0" />{error}</div>}
 
-            <div>
-              <div className="flex justify-between text-sm font-bold mb-1">
-                <span>Return to Base</span>
-                <span className="text-red-400">{recommendationDistribution.returnPct.toFixed(1)}%</span>
-              </div>
-              <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden">
-                <div className="h-full bg-red-500 transition-all duration-500" style={{ width: `${recommendationDistribution.returnPct}%` }}></div>
-              </div>
+        <section aria-label="Current dataset KPIs" className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {[
+            ['Active Drones', String(kpis.activeDrones), 'Unique drones in latest-record view', 'border-[#2E82D8] bg-[#2E82D8]'],
+            ['Average Battery', `${displayNumber(kpis.averageBattery)}%`, 'Mean battery of displayed drones', 'border-emerald-600 bg-emerald-600'],
+            ['Attention Required', String(kpis.attentionRequired), 'Return to Base plus Delay Mission', 'border-amber-500 bg-amber-500'],
+            ['Return / Delay', `${kpis.returnCount} / ${kpis.delayCount}`, 'Return to Base / Delay Mission', 'border-red-600 bg-red-600'],
+          ].map(([label, value, detail, color]) => <div key={label} className={`rounded-2xl border p-4 text-white shadow-sm ${color}`}><p className="text-xs font-semibold uppercase tracking-wide text-white/85">{label}</p><p className="mt-1 text-2xl font-extrabold text-white">{value}</p><p className="mt-1 text-xs text-white/90">{detail}</p></div>)}
+        </section>
+
+        <section className="mb-6 rounded-2xl border-2 border-[#242879] bg-white shadow-md" aria-labelledby="queue-heading">
+          <div className="flex flex-col gap-3 border-b border-blue-100 p-5 lg:flex-row lg:items-center lg:justify-between">
+            <div><h2 id="queue-heading" className="text-xl font-extrabold text-[#242879]">Priority Decision Queue</h2><p className="mt-1 text-sm text-slate-600">Sorted by recommendation, then lower battery, higher predicted power, and greater distance.</p></div>
+            <div className="flex flex-wrap gap-2">
+              <label className="sr-only" htmlFor="queue-search">Search decision queue</label><input id="queue-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search drone, mission, reason" className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline focus:outline-2 focus:outline-[#2E82D8]" />
+              <label className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2 text-sm"><SlidersHorizontal size={15} /><span className="sr-only">Filter recommendation</span><select aria-label="Filter recommendation" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)} className="bg-transparent py-2 outline-none"><option>All</option><option>Return to Base</option><option>Delay Mission</option><option>Continue Mission</option></select></label>
             </div>
           </div>
-          
-          <div className="mt-4 text-xs text-slate-450 font-medium leading-normal border-t border-slate-850 pt-3">
-            *Dựa trên trọng số mô hình: Mức pin (45%), Tốc độ gió (25%), Khoảng cách trạm (20%), Độ cao bay (10%).
+          <div className="overflow-x-auto">
+            <table className="min-w-[1000px] w-full text-left text-sm">
+              <thead className="bg-[#EAF6FC] text-xs uppercase tracking-wide text-[#242879]"><tr><th className="p-3">Priority</th><th className="p-3">Drone ID</th><th className="p-3">Battery</th><th className="p-3">Wind</th><th className="p-3">Distance to Base</th><th className="p-3">Predicted Power</th><th className="p-3">Recommendation</th><th className="p-3">Reason</th></tr></thead>
+              <tbody>{visibleQueue.map((record, index) => <tr key={`${record.drone_id}-${record.timestamp}`} tabIndex={0} aria-label={`Select ${record.drone_id}`} onClick={() => setSelectedDroneId(record.drone_id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedDroneId(record.drone_id); } }} className={`cursor-pointer border-t border-slate-100 outline-none hover:bg-blue-50 focus-visible:bg-blue-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#2E82D8] ${selected?.drone_id === record.drone_id ? 'bg-blue-50' : ''}`}><td className="p-3 font-extrabold text-[#242879]">{index + 1}</td><td className="p-3 font-bold">{record.drone_id}<span className="block text-xs font-normal text-slate-500">{record.mission_id}</span></td><td className="p-3">{displayNumber(record.battery_level_pct)}%</td><td className="p-3">{displayNumber(record.wind_speed_mps)} m/s</td><td className="p-3">{displayNumber(record.distance_to_base_m, 0)} m</td><td className="p-3 font-bold">{displayNumber(record.predicted_power_w)} W</td><td className="p-3">{actionBadge(record.recommended_action)}</td><td className="max-w-sm p-3 text-xs leading-5 text-slate-700">{record.decision_reason}</td></tr>)}
+                {!visibleQueue.length && <tr><td colSpan={8} className="p-8 text-center text-slate-500">No current decision records match this filter.</td></tr>}
+              </tbody>
+            </table>
           </div>
+        </section>
+
+        <div className="grid gap-6 lg:grid-cols-3">
+          <section className="rounded-2xl border border-blue-100 bg-white p-5 shadow-sm lg:col-span-2" aria-labelledby="detail-heading">
+            <div className="mb-4 flex items-center justify-between"><div><h2 id="detail-heading" className="text-lg font-extrabold text-[#242879]">Selected Drone Detail</h2><p className="text-sm text-slate-600">Observed, predicted, rule-derived, and human-confirmed information remain distinct.</p></div>{selected && actionBadge(selected.recommended_action)}</div>
+            {selected ? <>
+              <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">{[
+                ['Observed battery', `${displayNumber(selected.battery_level_pct)}%`], ['Observed wind', `${displayNumber(selected.wind_speed_mps)} m/s`], ['Observed distance', `${displayNumber(selected.distance_to_base_m, 0)} m`], ['Observed altitude', `${displayNumber(selected.altitude_m, 0)} m`], ['Observed speed', `${displayNumber(selected.speed_mps)} m/s`], ['Observed flight time', `${displayNumber(selected.flight_time_s, 0)} s`], ['Predicted power', `${displayNumber(selected.predicted_power_w)} W`], ['Model version', selected.model_version], ['Rule-derived action', selected.recommended_action],
+              ].map(([label, value]) => <div key={label} className="rounded-lg bg-[#EAF6FC] p-3"><p className="text-xs font-semibold text-slate-500">{label}</p><p className="mt-1 font-bold text-[#172033]">{value}</p></div>)}</div>
+              <div className="mt-4 rounded-lg border-l-4 border-[#2E82D8] bg-blue-50 p-3 text-sm"><strong>Rule-derived reason:</strong> {selected.decision_reason}<p className="mt-2 text-xs text-slate-600">Prototype assumptions — not manufacturer or legal limits.</p>{selected.rule_config && <p className="mt-2 text-xs text-slate-600">Critical battery ≤ {selected.rule_config.battery_critical_pct}%; caution battery ≤ {selected.rule_config.battery_caution_pct}%; high predicted power ≥ {selected.rule_config.power_high_w_train_q80} W; wind ≥ {selected.rule_config.wind_caution_mps_train_q90} m/s; far distance ≥ {selected.rule_config.distance_far_m_train_q75} m.</p>}</div>
+              <fieldset className="mt-5 rounded-lg border border-slate-200 p-4"><legend className="px-1 text-sm font-bold text-[#242879]">Human decision</legend><p className="mb-3 text-xs text-slate-600">{selectedLog ? `Recorded: ${selectedLog.decision_status} — ${selectedLog.operator_action}` : 'Pending operator review'}</p><div className="flex flex-col gap-2 md:flex-row"><button type="button" onClick={() => saveDecision(selected.recommended_action, 'Confirmed')} className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#242879] px-3 py-2 text-sm font-bold text-white hover:bg-[#2E82D8] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242879]"><CheckCircle2 size={16} /> Confirm recommendation</button><label className="sr-only" htmlFor="override-action">Override action</label><select id="override-action" value={overrideAction} onChange={(event) => setOverrideAction(event.target.value as Recommendation)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm"><option>Return to Base</option><option>Delay Mission</option><option>Continue Mission</option></select><label className="sr-only" htmlFor="override-reason">Override reason</label><input id="override-reason" value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} placeholder="Override reason (required)" className="min-w-48 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline focus:outline-2 focus:outline-[#2E82D8]" /><button type="button" onClick={() => saveDecision(overrideAction, 'Overridden')} className="rounded-lg border border-[#2E82D8] px-3 py-2 text-sm font-bold text-[#242879] hover:bg-[#EAF6FC] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#242879]">Override recommendation</button></div><p className="mt-3 text-xs text-slate-600">Decision recorded for prototype evaluation. No flight command is sent.</p></fieldset>
+            </> : <p className="py-12 text-center text-slate-500">Select a record from the priority queue.</p>}
+          </section>
+
+          <aside className="space-y-6">
+            <section className="rounded-2xl border border-blue-100 bg-white p-5 shadow-sm" aria-labelledby="quality-heading"><h2 id="quality-heading" className="text-lg font-extrabold text-[#242879]">Model Quality</h2>{modelMetrics && Number.isFinite(modelMetrics.MAE) ? <dl className="mt-3 space-y-2 text-sm"><div className="flex justify-between gap-3"><dt>Model name</dt><dd className="font-bold">{modelMetrics.model_name ?? '—'}</dd></div><div className="flex justify-between gap-3"><dt title="Average absolute prediction error in watts.">MAE ⓘ</dt><dd className="font-bold">{displayNumber(modelMetrics.MAE!)} W</dd></div><div className="flex justify-between gap-3"><dt title="Prediction error measure that gives more weight to large errors.">RMSE ⓘ</dt><dd className="font-bold">{displayNumber(modelMetrics.RMSE ?? NaN)} W</dd></div><div className="flex justify-between gap-3"><dt title="Share of target variation represented on the test set.">R² ⓘ</dt><dd className="font-bold">{displayNumber(modelMetrics.R2 ?? NaN, 3)}</dd></div><div className="flex justify-between gap-3"><dt>Model version</dt><dd className="font-bold">{modelMetrics.model_version ?? selected?.model_version ?? '—'}</dd></div><p className="pt-2 text-xs text-slate-600">Evaluated on the held-out test set.</p></dl> : <p className="mt-3 text-sm text-slate-600">Model metrics are unavailable until <code>test_metrics.csv</code> is placed in the published outputs folder or supplied by the API.</p>}</section>
+            <section className="rounded-2xl border border-blue-100 bg-white p-5 shadow-sm" aria-labelledby="quality-data-heading"><h2 id="quality-data-heading" className="text-lg font-extrabold text-[#242879]">Data Quality</h2><dl className="mt-3 space-y-2 text-sm"><div className="flex justify-between"><dt>Total uploaded rows</dt><dd className="font-bold">{validation.totalRows}</dd></div><div className="flex justify-between"><dt>Valid rows</dt><dd className="font-bold">{validation.records.length}</dd></div><div className="flex justify-between"><dt>Rejected rows</dt><dd className="font-bold">{validation.rejected.length}</dd></div><div><dt className="font-medium">Missing/invalid fields</dt><dd className="mt-1 break-words text-xs text-slate-600">{missingSummary}</dd></div></dl>{validation.rejected.length > 0 && <details className="mt-3 text-xs"><summary className="cursor-pointer font-bold text-[#242879]">View rejected-row report</summary><ul className="mt-2 list-disc space-y-1 pl-4 text-slate-600">{validation.rejected.map((item) => <li key={item.rowNumber}>Row {item.rowNumber}: {[...item.missingFields, ...item.invalidFields].join(', ')}</li>)}</ul></details>}</section>
+          </aside>
         </div>
 
-        {/* SELECTED DRONE BATTERY TREND CHART */}
-        <div className="lg:col-span-3 bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg flex flex-col">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-slate-350 text-sm font-bold uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-1.5 h-3 bg-amber-500 rounded"></span> Biểu đồ xu hướng pin (Battery Trend)
-            </h3>
-            {selectedDroneId ? (
-              <span className="px-2 py-0.5 text-sm font-bold bg-slate-800 text-white rounded">
-                {selectedDroneId}
-              </span>
-            ) : (
-              <span className="text-sm font-semibold text-slate-450">Chọn drone để xem biểu đồ xu hướng</span>
-            )}
-          </div>
+        <section className="mt-6 rounded-2xl border border-blue-100 bg-white p-5 shadow-sm" aria-labelledby="importance-heading"><h2 id="importance-heading" className="text-lg font-extrabold text-[#242879]">Model Explanation</h2><p className="mt-1 text-sm text-slate-600">Permutation importance on model evaluation data.</p>{importance.length ? <div className="mt-4 space-y-3">{importance.map((item) => <div key={item.feature} className="grid grid-cols-[minmax(110px,180px)_1fr_72px] items-center gap-3 text-sm"><span className="break-words font-medium">{item.feature}</span><div className="h-5 overflow-hidden rounded bg-[#EAF6FC]"><div className="h-full rounded bg-[#2E82D8]" style={{ width: `${Math.max(0, Math.abs(item.importance) / maximumImportance * 100)}%` }} /></div><span className="text-right tabular-nums">{displayNumber(item.importance, 4)}</span></div>)}</div> : <p className="mt-3 text-sm text-slate-600">Feature importance is unavailable until <code>permutation_importance.csv</code> is placed in the published outputs folder.</p>}<p className="mt-3 text-xs text-slate-600">Importance indicates model reliance, not causality.</p></section>
 
-          <div className="relative flex-grow min-h-[160px] bg-slate-950 border border-slate-800/80 rounded-xl flex items-center justify-center p-4">
-            {selectedDroneId && selectedDroneHistory.length > 0 ? (
-              <svg className="w-full h-full min-h-[150px]" viewBox="0 0 500 120" preserveAspectRatio="none">
-                <defs>
-                  <linearGradient id="batteryGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#10b981" stopOpacity="0.3" />
-                    <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
+        <section className="mt-6 rounded-2xl border border-blue-100 bg-white p-5 shadow-sm" aria-labelledby="log-heading"><div className="flex items-center justify-between gap-3"><div><h2 id="log-heading" className="text-lg font-extrabold text-[#242879]">Decision Log</h2><p className="text-sm text-slate-600">Human actions are local to this prototype and are not transmitted to a drone.</p></div><button type="button" disabled={!decisionLog.length} onClick={exportLog} className="inline-flex items-center gap-2 rounded-lg border border-[#2E82D8] px-3 py-2 text-sm font-bold text-[#242879] disabled:cursor-not-allowed disabled:opacity-50"><Download size={16} /> Export CSV</button></div>{decisionLog.length ? <div className="mt-4 overflow-x-auto"><table className="min-w-[850px] w-full text-left text-xs"><thead className="border-b border-slate-200 text-slate-500"><tr><th className="p-2">Timestamp</th><th className="p-2">Drone</th><th className="p-2">Predicted power</th><th className="p-2">System recommendation</th><th className="p-2">Operator action</th><th className="p-2">Status</th></tr></thead><tbody>{decisionLog.map((entry) => <tr key={`${entry.timestamp}-${entry.drone_id}`} className="border-b border-slate-100"><td className="p-2">{new Date(entry.timestamp).toLocaleString()}</td><td className="p-2">{entry.drone_id}</td><td className="p-2">{displayNumber(entry.predicted_power_w)} W</td><td className="p-2">{entry.system_recommendation}</td><td className="p-2">{entry.operator_action}</td><td className="p-2 font-bold">{entry.decision_status}</td></tr>)}</tbody></table></div> : <p className="mt-4 text-sm text-slate-500">No decisions recorded yet.</p>}</section>
 
-                {/* Y Axis Grid Lines */}
-                <line x1="0" y1="12" x2="500" y2="12" stroke="#334155" strokeWidth="0.5" opacity="0.3" strokeDasharray="4 4" />
-                <line x1="0" y1="60" x2="500" y2="60" stroke="#334155" strokeWidth="0.5" opacity="0.3" strokeDasharray="4 4" />
-                <line x1="0" y1="108" x2="500" y2="108" stroke="#334155" strokeWidth="0.5" opacity="0.3" strokeDasharray="4 4" />
-                
-                {/* Text indicators */}
-                <text x="5" y="10" fill="#94a3b8" fontSize="9" fontWeight="bold">100%</text>
-                <text x="5" y="58" fill="#94a3b8" fontSize="9" fontWeight="bold">50%</text>
-                <text x="5" y="106" fill="#94a3b8" fontSize="9" fontWeight="bold">10%</text>
-
-                {/* Render SVG Line and Gradient Area */}
-                {(() => {
-                  const points = selectedDroneHistory.map((d, index) => {
-                    const x = (index / (selectedDroneHistory.length - 1)) * 480 + 10;
-                    // Scale battery level (0-100) to height range (110-10)
-                    const y = 110 - (d.battery_level_pct / 100) * 100;
-                    return { x, y, val: d.battery_level_pct };
-                  });
-
-                  const linePath = points.map(p => `${p.x},${p.y}`).join(' ');
-                  const areaPath = `${points[0].x},110 ` + linePath + ` ${points[points.length - 1].x},110`;
-
-                  return (
-                    <g>
-                      {/* Gradient Fill */}
-                      <polygon points={areaPath} fill="url(#batteryGrad)" />
-                      {/* Smooth Trend Line */}
-                      <polyline points={linePath} fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                      
-                      {/* Hover / Point Circles */}
-                      {points.map((p, index) => (
-                        <g key={index} className="group/dot">
-                          <circle 
-                            cx={p.x} 
-                            cy={p.y} 
-                            r="2.5" 
-                            fill="#10b981" 
-                            stroke="#ffffff" 
-                            strokeWidth="1"
-                            className="cursor-pointer hover:r-4 transition-all" 
-                          />
-                          {/* Tooltip for points */}
-                          <text 
-                            x={p.x} 
-                            y={p.y - 8} 
-                            fill="#10b981" 
-                            fontSize="9" 
-                            fontWeight="extrabold" 
-                            textAnchor="middle" 
-                            className="opacity-0 group-hover/dot:opacity-100 transition-opacity pointer-events-none"
-                          >
-                            {p.val}%
-                          </text>
-                        </g>
-                      ))}
-                    </g>
-                  );
-                })()}
-              </svg>
-            ) : (
-              <div className="text-slate-500 text-xs">
-                Không đủ dữ liệu lịch sử bay cho drone được chọn để tạo biểu đồ.
-              </div>
-            )}
-          </div>
-          <div className="flex justify-between items-center text-xs text-slate-450 font-medium mt-2.5 px-2">
-            <span>Bắt đầu phiên bay</span>
-            <span>Giảm dần theo thời gian Telemetry</span>
-            <span>Kết thúc phiên bay</span>
-          </div>
-        </div>
-
+        {isLoading && <div role="status" className="fixed bottom-5 right-5 flex items-center gap-2 rounded-lg bg-[#242879] px-4 py-3 text-sm font-bold text-white shadow-lg"><RefreshCw className="animate-spin" size={16} /> Processing valid records…</div>}
       </div>
-
-      {/* TIER 3: DRONE DETAIL TABLE */}
-      <div className="bg-slate-900 rounded-xl p-5 border border-slate-800 shadow-lg overflow-x-auto">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-slate-350 text-sm font-bold uppercase tracking-wider flex items-center gap-1.5">
-            <span className="w-1.5 h-3 bg-amber-500 rounded"></span> Bảng chi tiết phi đội (Drone Detail Table)
-          </h3>
-          <span className="text-xs font-semibold text-slate-350 font-mono">Hiển thị {filteredData.length} bản ghi khớp</span>
-        </div>
-        
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="text-sm text-slate-200 border-b border-slate-850 uppercase tracking-wider font-extrabold">
-              <th className="pb-3.5 pl-2">Drone ID</th>
-              <th className="pb-3.5">Nhiệm vụ (Mission)</th>
-              <th className="pb-3.5 text-center">Khuyến nghị AI</th>
-              <th className="pb-3.5 text-center">Độ tin cậy</th>
-              <th className="pb-3.5 text-center">Mức pin</th>
-              <th className="pb-3.5 text-center">Tốc độ gió (m/s)</th>
-              <th className="pb-3.5 text-center">Khoảng cách (m)</th>
-              <th className="pb-3.5">Lý do rủi ro</th>
-            </tr>
-          </thead>
-          <tbody className="text-sm">
-            {filteredData.slice(0, 100).map((row, idx) => {
-              const isSelected = selectedDroneId === row.Drone_ID;
-              return (
-                <tr 
-                  key={idx} 
-                  onClick={() => setSelectedDroneId(row.Drone_ID)}
-                  className={`border-b border-slate-850/60 hover:bg-slate-850/50 cursor-pointer transition ${
-                    isSelected ? 'bg-slate-850/70 border-l-2 border-l-amber-500' : ''
-                  } ${
-                    row.DSS_Recommendation === 'Return to Base' ? 'bg-red-500/5' : 
-                    row.DSS_Recommendation === 'Delay Mission' ? 'bg-amber-500/5' : ''
-                  }`}
-                >
-                  <td className="py-4 pl-2 text-sm font-extrabold text-white flex items-center gap-1.5">
-                    <Navigation size={13} className={isSelected ? 'text-amber-500 animate-pulse' : 'text-slate-400'} />
-                    {row.Drone_ID || 'Unknown'}
-                  </td>
-                  <td className="py-4 text-xs text-slate-200 font-mono font-semibold">{row.mission_id || 'N/A'}</td>
-                  <td className="py-4 text-center">
-                    <span className={`px-2.5 py-1 rounded text-xs font-extrabold ${
-                      row.DSS_Recommendation === 'Return to Base' ? 'bg-red-500/10 text-red-400 border border-red-900/30' :
-                      row.DSS_Recommendation === 'Delay Mission' ? 'bg-amber-500/10 text-amber-400 border border-amber-900/30' :
-                      'bg-emerald-500/10 text-emerald-450 border border-emerald-900/30'
-                    }`}>
-                      {row.DSS_Recommendation}
-                    </span>
-                  </td>
-                  <td className="py-4 text-center font-bold text-slate-100 text-sm">
-                    {row.Confidence_Score ? (row.Confidence_Score * 100).toFixed(1) : '100.0'}%
-                  </td>
-                  <td className="py-4">
-                    <div className="flex items-center justify-center gap-2">
-                      <div className="w-12 h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
-                        <div className={`h-full ${row.battery_level_pct < 20 ? 'bg-red-500' : row.battery_level_pct < 45 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${row.battery_level_pct}%` }}></div>
-                      </div>
-                      <span className="text-sm font-bold text-slate-200">{row.battery_level_pct}%</span>
-                    </div>
-                  </td>
-                  <td className="py-4 text-center font-bold text-slate-200 text-sm">
-                    {row.wind_speed_mps ? row.wind_speed_mps.toFixed(2) : '0.00'}
-                  </td>
-                  <td className="py-4 text-center font-bold text-slate-200 text-sm">
-                    {row.distance_to_base_m}
-                  </td>
-                  <td className="py-4 text-slate-250 text-xs font-medium">{row.Risk_Factor}</td>
-                </tr>
-              );
-            })}
-            
-            {filteredData.length === 0 && (
-              <tr>
-                <td colSpan={8} className="text-center py-8 text-slate-500">
-                  Không có dữ liệu phù hợp với bộ lọc hiện tại. Hãy thử tìm kiếm hoặc lọc từ slicer khác.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        
-        {filteredData.length > 100 && (
-          <div className="text-center py-3 text-xs text-slate-500 border-t border-slate-850">
-            Hiển thị tối đa 100 dòng bản ghi trên bảng để giữ hiệu năng tải trang.
-          </div>
-        )}
-      </div>
-
-    </div>
+    </main>
   );
 }

@@ -1,41 +1,4 @@
 @import "tailwindcss";
 
-/* Leaflet Dark Mode Custom Styles */
-.leaflet-container {
-  background: #020617 !important;
-}
-
-.leaflet-tooltip.custom-leaflet-tooltip {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-}
-
-.leaflet-bar {
-  border: 1px solid #1e293b !important;
-  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1) !important;
-}
-
-.leaflet-bar a {
-  background-color: #0f172a !important;
-  color: #e2e8f0 !important;
-  border-bottom: 1px solid #1e293b !important;
-  transition: all 0.2s;
-}
-
-.leaflet-bar a:hover {
-  background-color: #1e293b !important;
-  color: #fbbf24 !important;
-}
-
-.leaflet-bar a.leaflet-disabled {
-  background-color: #0f172a !important;
-  opacity: 0.5;
-  color: #64748b !important;
-}
-
-/* Fix marker z-index transitions */
-.custom-drone-icon-wrap {
-  transition: transform 0.3s ease-out;
-}
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; background: #eaf6fc; }
+button, input, select { font: inherit; }

@@ -1,5 +1,5 @@
 export type Recommendation = 'Return to Base' | 'Delay Mission' | 'Continue Mission';
-export type PredictionMode = 'live' | 'precomputed' | 'demo';
+export type PredictionMode = 'live' | 'precomputed' | 'raw-review' | 'demo';
 
 export interface RuleConfig {
   battery_critical_pct: number;
@@ -35,6 +35,9 @@ export interface QueueRecord extends TelemetryRecord {
   recommended_action: Recommendation;
   decision_reason: string;
   model_version: string;
+  priority_rank?: number;
+  priority_level?: string;
+  priority_score?: number;
   rule_config?: RuleConfig;
 }
 
@@ -49,6 +52,8 @@ export interface ValidationResult {
   rejected: RejectedRecord[];
   totalRows: number;
   detectedPrecomputedOutput: boolean;
+  acceptedRows?: number;
+  rejectedRows?: number;
 }
 
 export interface ModelMetrics {
@@ -65,7 +70,8 @@ export interface ImportanceItem {
 }
 
 export interface DecisionLogEntry {
-  timestamp: string;
+  decision_timestamp: string;
+  record_timestamp: string;
   drone_id: string;
   mission_id: string;
   model_version: string;
@@ -75,4 +81,5 @@ export interface DecisionLogEntry {
   operator_action: Recommendation;
   override_reason: string;
   decision_status: 'Confirmed' | 'Overridden' | 'Pending';
+  data_mode: PredictionMode;
 }

@@ -16,13 +16,6 @@ export function hasModelApi(): boolean {
   return Boolean(modelApiUrl);
 }
 
-function isRuleConfig(value: unknown): value is RuleConfig {
-  if (!value || typeof value !== 'object') return false;
-  const config = value as Record<string, unknown>;
-  return ['battery_critical_pct', 'battery_caution_pct', 'power_high_w_train_q80', 'wind_caution_mps_train_q90', 'distance_far_m_train_q75']
-    .every((key) => Number.isFinite(config[key]));
-}
-
 export async function requestPredictions(records: TelemetryRecord[], apiUrl = modelApiUrl) {
   if (!apiUrl) throw new ModelApiError('MODEL_API_URL is not configured. Load precomputed model output or configure a prediction service.');
   let response: Response;
@@ -41,7 +34,6 @@ export async function requestPredictions(records: TelemetryRecord[], apiUrl = mo
     throw new ModelApiError('The model service returned invalid JSON.');
   }
   if (!Array.isArray(payload.predictions)) throw new ModelApiError('The model response is missing its predictions array.');
-  if (!isRuleConfig(payload.rule_config)) throw new ModelApiError('The model response is missing a valid rule_config; prototype recommendations cannot be evaluated safely.');
 
   const predictionsByIdentity = new Map(payload.predictions.map((prediction) => [
     `${prediction.timestamp ?? ''}|${prediction.mission_id ?? ''}|${prediction.drone_id ?? ''}`,

@@ -1,36 +1,49 @@
 # UAV Energy Decision Support
 
-Academic decision-support prototype for in-flight solar-farm inspection operations. It predicts `power_consumption_watts` through an external regression service, then applies separate prototype rules to help an Operations Engineer review Continue, Delay, or Return recommendations. It never sends a flight command.
+Academic decision-support prototype for in-flight inspection decisions. It organizes observed telemetry, displays an experimental power estimate when one is available, applies prototype decision rules, and records the Operations Engineer's decision. It never sends a flight command.
+
+Academic decision-support prototype. Recommendations are based on proxy telemetry data and prototype rules. The Operations Engineer retains final authority.
 
 ## Architecture
 
-This repository remains a React + TypeScript + Vite single-page application, deployed to Vercel with the existing SPA rewrite. It has no Python runtime or Vercel API route. The browser sends validated feature records to `MODEL_API_URL` when configured. The prediction service must implement `POST /predict`, load `uav_power_regression_v1.joblib`, return the documented prediction response plus `rule_config`, and enable CORS for the dashboard origin.
+This remains a React + TypeScript + Vite single-page application with Tailwind CSS and the existing Vercel SPA rewrite. The reusable DSS logic is in `src/lib`: telemetry validation and feature engineering, the prototype rules, priority sorting/KPIs, model client, and decision-log construction. `api/predict.py` is a Python endpoint that loads the verified model bundle outside the public frontend directory.
 
-Without that endpoint, the app can load a verified precomputed queue or use clearly labeled demo data. It does not fabricate predictions.
+The browser calls `MODEL_API_URL`, which defaults locally to `http://127.0.0.1:8000/predict`. For a raw upload, only the latest valid record for each drone is sent to the model endpoint; this is the dashboard's current latest-record view and prevents a 140,000-row CSV from becoming a large model request. The dashboard applies its local verified prototype rules; the model output is never the final Continue / Return / Delay decision. Do not publish `uav_power_regression_v1.joblib` in `public`.
 
-## Notebook output placement
+## Data modes
 
-Copy the notebook outputs into `public/outputs` while preserving their output-relative paths:
+- **Precomputed decision queue (recommended demo mode):** Upload `dashboard_decision_queue.csv`. It is labeled “Precomputed model output — no live model request was performed.”
+- **Raw telemetry:** The app validates the raw fields and derives speed, acceleration, wind direction, and hour encodings. With `MODEL_API_URL`, it requests experimental estimates and builds the priority queue. Without it, the app remains usable in raw telemetry review and does not invent predictions.
+- **Demo data:** Clearly marked proxy records for a traceable walkthrough, not live telemetry.
+
+Expected precomputed columns include `priority_rank`, `priority_level`, `priority_score`, `drone_id`, `timestamp`, `mission_id`, `battery_level_pct`, `wind_speed_mps`, `distance_to_base_m`, `altitude_m`, `speed_mps`, `flight_time_s`, and `predicted_power_w`. If `recommended_action` and `decision_reason` are also present, the dashboard ignores them and derives the current recommendation and reason from the verified local prototype rules.
+
+## Notebook outputs
+
+Optional generated files can be served from `public/outputs/model/`:
 
 ```text
-public/outputs/data/SurveilDrone_Net23_cleaned.csv
-public/outputs/data/modeling_data.csv
-public/outputs/eda/eda_summary.json
-public/outputs/eda/eda_numeric_associations.csv
-public/outputs/model/test_metrics.csv
-public/outputs/model/test_predictions.csv
-public/outputs/model/permutation_importance.csv
 public/outputs/model/dashboard_decision_queue.csv
+public/outputs/model/test_metrics.csv
+public/outputs/model/permutation_importance.csv
 public/outputs/model/artifacts/uav_power_regression_v1_metadata.json
 ```
 
-Keep `uav_power_regression_v1.joblib` out of `public`: a browser cannot use it. Deploy that bundle with the Python prediction service instead. The dashboard automatically attempts to load metrics, permutation importance, metadata, and the precomputed decision queue from these public paths. The queue must include the telemetry fields used by the dashboard plus `predicted_power_w`, `recommended_action`, and `decision_reason`.
+`uav_power_regression_v1.joblib` must remain outside the frontend public directory.
 
-## Environment
+## Environment and deployment
 
-Copy `.env.example` to `.env.local` and configure `MODEL_API_URL` for live predictions. Because this is a static browser application, the URL is public at build time. Do not add an API key to a Vite environment variable; authentication requires a server-side proxy or an appropriately protected model service.
+For local use, start the API using Python with the dependencies in `requirements.txt`, then start Vite in a second terminal:
 
-In Vercel, add `MODEL_API_URL` to the project environment variables and redeploy. The endpoint must be HTTPS and permit cross-origin POST requests from the deployed dashboard.
+```bash
+python -m pip install -r requirements.txt
+python api/predict.py
+npm run dev
+```
+
+`.env.local` is preconfigured with `MODEL_API_URL=http://127.0.0.1:8000/predict`; restart Vite after changing it. `MODEL_API_KEY` is intentionally not read by browser code.
+
+For Vercel, `api/predict.py` is deployed as `/api/predict` and the model artifact is kept under `api/model_artifacts/`, never `public/`. Set `MODEL_API_URL=/api/predict` in the Vercel project environment, then redeploy. The existing SPA rewrite remains unchanged.
 
 ## Run and verify
 
@@ -41,13 +54,3 @@ npm run test
 npm run lint
 npm run build
 ```
-
-The test suite covers feature engineering, missing-field rejection, decision rules, queue sorting, KPIs, precomputed-mode labeling, and API failure handling.
-
-## CSV modes
-
-- Raw telemetry upload: validates required identifiers/features, derives speed, acceleration, wind-direction and hour encodings, requests the configured model, then applies the separate decision-rule layer.
-- Precomputed output upload: detected only when the model-output fields are supplied. It is explicitly labeled “Precomputed model output — no live model request was performed.”
-- Demo: stable proxy telemetry records for walkthrough only, explicitly labeled “Demo data — not live telemetry.”
-
-Prototype rule thresholds are dataset-derived assumptions, not manufacturer or legal limits. The Operations Engineer retains final authority.

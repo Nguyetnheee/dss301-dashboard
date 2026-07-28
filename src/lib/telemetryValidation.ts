@@ -1,5 +1,5 @@
 import type { RejectedRecord, TelemetryRecord, ValidationResult } from '../types';
-import { isRecommendation } from './decisionRules';
+import { applyDecisionRule, prototypeRuleConfig } from './decisionRules';
 
 const FEATURE_FIELDS = [
   'altitude_m', 'speed_mps', 'acceleration_mps2', 'distance_to_base_m', 'battery_level_pct',
@@ -8,14 +8,14 @@ const FEATURE_FIELDS = [
 ] as const;
 
 const ID_FIELDS = ['timestamp', 'mission_id', 'drone_id'] as const;
-const PRECOMPUTED_DISPLAY_FIELDS = ['timestamp', 'mission_id', 'drone_id', 'battery_level_pct', 'wind_speed_mps', 'distance_to_base_m'] as const;
+const PRECOMPUTED_REQUIRED_FIELDS = [
+  'timestamp', 'mission_id', 'drone_id', 'battery_level_pct', 'wind_speed_mps', 'distance_to_base_m',
+  'altitude_m', 'speed_mps', 'flight_time_s', 'predicted_power_w',
+] as const;
 
 const aliases: Record<string, string> = {
   droneid: 'drone_id', drone_id: 'drone_id', drone: 'drone_id',
   predictedpowerw: 'predicted_power_w', predicted_power_w: 'predicted_power_w',
-  power_consumption_watts: 'predicted_power_w', powerconsumptionwatts: 'predicted_power_w',
-  recommendedaction: 'recommended_action', dssrecommendation: 'recommended_action',
-  decisionreason: 'decision_reason', riskfactor: 'decision_reason',
   winddirdeg: 'wind_dir_deg', winddirectiondeg: 'wind_dir_deg',
 };
 
@@ -51,14 +51,13 @@ export function validateTelemetryRows(sourceRows: Record<string, string>[]): Val
   const records: TelemetryRecord[] = [];
   const rejected: RejectedRecord[] = [];
   const normalizedRows = sourceRows.map((source) => Object.fromEntries(Object.entries(source).map(([key, value]) => [normalizeColumnName(key), value.trim()])));
-  const detectedPrecomputedOutput = normalizedRows.length > 0 && normalizedRows.every((row) => ['predicted_power_w', 'recommended_action', 'decision_reason'].every((field) => field in row));
+  const detectedPrecomputedOutput = normalizedRows.length > 0 && normalizedRows.every((row) => 'predicted_power_w' in row);
 
   normalizedRows.forEach((row, rowIndex) => {
     const missingFields: string[] = [];
     const invalidFields: string[] = [];
-    const isPrecomputed = ['predicted_power_w', 'recommended_action', 'decision_reason'].every((field) => field in row);
-    const requiredIds = isPrecomputed ? PRECOMPUTED_DISPLAY_FIELDS : ID_FIELDS;
-    requiredIds.forEach((field) => {
+    const isPrecomputed = 'predicted_power_w' in row;
+    (isPrecomputed ? PRECOMPUTED_REQUIRED_FIELDS : ID_FIELDS).forEach((field) => {
       if (!row[field]?.trim()) addMissing(missingFields, field);
     });
 
@@ -78,14 +77,16 @@ export function validateTelemetryRows(sourceRows: Record<string, string>[]): Val
     const hourCos = numberValue(row, 'hour_cos', invalidFields);
     const windDirection = numberValue(row, 'wind_dir_deg', invalidFields);
 
-    FEATURE_FIELDS.forEach((field) => {
+    const requiredFeatures = isPrecomputed
+      ? ['altitude_m', 'speed_mps', 'distance_to_base_m', 'battery_level_pct', 'flight_time_s', 'wind_speed_mps']
+      : FEATURE_FIELDS;
+    requiredFeatures.forEach((field) => {
       const available = ({ altitude_m: altitude, speed_mps: speed, acceleration_mps2: acceleration, distance_to_base_m: distance, battery_level_pct: battery, flight_time_s: flightTime, hover_duration_s: hoverDuration, camera_active: camera, ambient_temp_C: temperature, wind_speed_mps: windSpeed, wind_dir_sin: windSin ?? windDirection, wind_dir_cos: windCos ?? windDirection, hour_sin: hourSin ?? row.timestamp, hour_cos: hourCos ?? row.timestamp } as Record<string, unknown>)[field];
       if (available === undefined || available === '') addMissing(missingFields, field);
     });
     if (isPrecomputed) {
-      ['predicted_power_w', 'recommended_action', 'decision_reason'].forEach((field) => {
-        if (!row[field]?.trim()) addMissing(missingFields, field);
-      });
+      const predicted = numberValue(row, 'predicted_power_w', invalidFields);
+      if (predicted === undefined) addMissing(missingFields, 'predicted_power_w');
     }
 
     if (missingFields.length || invalidFields.length) {
@@ -116,15 +117,19 @@ export function validateTelemetryRows(sourceRows: Record<string, string>[]): Val
 
 export function buildPrecomputedRecords(sourceRows: Record<string, string>[], telemetry: TelemetryRecord[]) {
   const normalizedRows = sourceRows.map((source) => Object.fromEntries(Object.entries(source).map(([key, value]) => [normalizeColumnName(key), value.trim()])));
+  const sourceByIdentity = new Map(normalizedRows.map((row) => [`${row.timestamp}|${row.mission_id}|${row.drone_id}`, row]));
   return telemetry.flatMap((record) => {
-    const source = normalizedRows.find((row) => row.timestamp === record.timestamp && row.mission_id === record.mission_id && row.drone_id === record.drone_id);
-    if (!source || !Number.isFinite(Number(source.predicted_power_w)) || !isRecommendation(source.recommended_action)) return [];
+    const source = sourceByIdentity.get(`${record.timestamp}|${record.mission_id}|${record.drone_id}`);
+    if (!source || !Number.isFinite(Number(source.predicted_power_w))) return [];
+    const predictedPower = Number(source.predicted_power_w);
     return [{
-    ...record,
-    predicted_power_w: Number(source.predicted_power_w),
-    recommended_action: source.recommended_action,
-    decision_reason: source.decision_reason,
-    model_version: source.model_version || 'Precomputed model output',
+      ...record,
+      predicted_power_w: predictedPower,
+      ...applyDecisionRule(record, predictedPower, prototypeRuleConfig),
+      model_version: source.model_version || 'uav_power_regression_v1',
+      priority_rank: Number.isFinite(Number(source.priority_rank)) ? Number(source.priority_rank) : undefined,
+      priority_level: source.priority_level || undefined,
+      priority_score: Number.isFinite(Number(source.priority_score)) ? Number(source.priority_score) : undefined,
     }];
   });
 }
